@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 from backend.app.core.config import settings
 from backend.app.models.assignment import AssignmentStatus
+from backend.app.models.notification import NotificationType
 from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.admin_repo import AdminRepository
 from backend.app.repositories.notification_repo import NotificationRepository
@@ -12,6 +13,26 @@ from backend.app.services.deadline_management.deadline_service import DeadlineSe
 from backend.app.services.assignment_publishing.publishing_service import PublishingService
 
 logger = logging.getLogger(__name__)
+
+
+def parse_edit_fields(args_text: str) -> dict:
+    """
+    Parses key=value arguments supporting quoted strings ("...", '...') and unquoted tokens.
+    Example: title="Assignment 1" deadline=2026-11-20 18:00 desc='Solve problem 1'
+    """
+    pattern = re.compile(
+        r'(?P<key>[a-zA-Z_]+)\s*=\s*(?:"(?P<qval>[^"]*)"|\'(?P<sqval>[^\']*)\'|(?P<rawval>[^=]+?(?=\s+[a-zA-Z_]+\s*=|(?:\s*$))))',
+        re.DOTALL
+    )
+    fields = {}
+    for match in pattern.finditer(args_text):
+        key = match.group("key").lower()
+        val = match.group("qval") if match.group("qval") is not None else (
+            match.group("sqval") if match.group("sqval") is not None else match.group("rawval")
+        )
+        if val is not None:
+            fields[key] = val.strip()
+    return fields
 
 
 class AdminCommandService:
@@ -99,48 +120,95 @@ class AdminCommandService:
 
         elif cmd == "edit":
             if len(parts) < 3:
-                return "⚠️ Format: `/edit <ID> title=... deadline=YYYY-MM-DD instructions=...`"
+                return "⚠️ Format: `/edit <ID> title=... deadline=YYYY-MM-DD course=... instructions=...`"
             code = parts[1]
             assignment = await assignment_repo.get_by_id_or_short_code(code)
             if not assignment:
                 return f"Assignment with ID '{code}' not found."
 
             raw_args = " ".join(parts[2:])
+            parsed_fields = parse_edit_fields(raw_args)
+            if not parsed_fields:
+                return "⚠️ No recognized fields found. Supported: title=, course=, course_title=, deadline=, desc=, instructions="
+
             updates_made = []
 
-            # Match title=...
-            m_title = re.search(r'title=([^=]+?)(?=\s+[a-z]+=|$)', raw_args, re.IGNORECASE)
-            if m_title:
-                assignment.title = m_title.group(1).strip()
+            # 1. Title
+            if "title" in parsed_fields:
+                assignment.title = parsed_fields["title"]
                 updates_made.append(f"title -> {assignment.title}")
 
-            # Match course=...
-            m_course = re.search(r'course=([^=]+?)(?=\s+[a-z]+=|$)', raw_args, re.IGNORECASE)
-            if m_course:
-                assignment.course_code = m_course.group(1).strip().upper()
+            # 2. Course Code
+            if "course" in parsed_fields or "course_code" in parsed_fields:
+                val = parsed_fields.get("course") or parsed_fields.get("course_code")
+                assignment.course_code = val.upper()
                 updates_made.append(f"course -> {assignment.course_code}")
 
-            # Match deadline=...
-            m_deadline = re.search(r'deadline=([^=]+?)(?=\s+[a-z]+=|$)', raw_args, re.IGNORECASE)
-            if m_deadline:
-                d_str = m_deadline.group(1).strip()
+            # 3. Course Title
+            if "course_title" in parsed_fields:
+                assignment.course_title = parsed_fields["course_title"]
+                updates_made.append(f"course_title -> {assignment.course_title}")
+
+            # 4. Description
+            if "desc" in parsed_fields or "description" in parsed_fields:
+                assignment.description = parsed_fields.get("desc") or parsed_fields.get("description")
+                updates_made.append("description updated")
+
+            # 5. Instructions
+            if "instructions" in parsed_fields or "submission" in parsed_fields:
+                assignment.submission_instructions = parsed_fields.get("instructions") or parsed_fields.get("submission")
+                updates_made.append("submission instructions updated")
+
+            # 6. Deadline
+            deadline_changed = False
+            if "deadline" in parsed_fields or "due" in parsed_fields:
+                d_str = parsed_fields.get("deadline") or parsed_fields.get("due")
                 new_dt, clarif = self.deadline_service.parse_deadline(d_str)
                 assignment.deadline_at = new_dt
                 assignment.deadline_clarification_needed = clarif
                 updates_made.append(f"deadline -> {self.deadline_service.format_deadline_for_display(new_dt)}")
+                deadline_changed = True
 
-                # Cancel and reschedule reminders if already published
-                if assignment.status == AssignmentStatus.PUBLISHED:
+            if not updates_made:
+                return "⚠️ No valid field updates applied."
+
+            # If already published or updated, manage reminders and broadcast update to class group
+            if assignment.status in [AssignmentStatus.PUBLISHED, AssignmentStatus.UPDATED]:
+                assignment.status = AssignmentStatus.UPDATED
+
+                if deadline_changed:
                     await notification_repo.cancel_for_assignment(assignment.id)
-                    if new_dt and not clarif:
-                        reminder_time = self.deadline_service.calculate_reminder_time(new_dt)
+                    if assignment.deadline_at and not assignment.deadline_clarification_needed:
+                        reminder_time = self.deadline_service.calculate_reminder_time(assignment.deadline_at)
                         if reminder_time:
                             await notification_repo.create_notification(
-                                notification_type="reminder_24h",
+                                notification_type=NotificationType.REMINDER_24H,
                                 target_jid=settings.CLASS_GROUP_JID,
                                 scheduled_for=reminder_time,
                                 assignment_id=assignment.id,
                             )
+
+                # Format and dispatch update broadcast to class group via outbox
+                reason_str = ", ".join(updates_made)
+                update_msg = self.publishing_service.format_update_announcement(
+                    assignment=assignment,
+                    update_reason=f"Admin modification: {reason_str}",
+                )
+                update_notif = await notification_repo.create_notification(
+                    notification_type=NotificationType.ASSIGNMENT_UPDATE,
+                    target_jid=settings.CLASS_GROUP_JID,
+                    scheduled_for=datetime.now(timezone.utc),
+                    assignment_id=assignment.id,
+                    payload={"text": update_msg},
+                )
+                try:
+                    await self.review_service.notification_service.execute_notification(
+                        notification=update_notif,
+                        notification_repo=notification_repo,
+                        assignment_repo=assignment_repo,
+                    )
+                except Exception as e:
+                    logger.warning(f"Immediate dispatch of update broadcast deferred: {str(e)}")
 
             await assignment_repo.session.flush()
             await assignment_repo.log_audit(
