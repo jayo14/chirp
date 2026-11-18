@@ -2,13 +2,14 @@ import { downloadMediaMessage, WAMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { CONFIG } from './config.js';
 import { IncomingMediaAttachment } from './types.js';
+import { unwrapActualMessage, getNormalizedWAMessage } from './message-utils.js';
 
 const logger = pino({ level: CONFIG.logLevel });
 
 export async function extractMediaFromMessage(
   msg: WAMessage
 ): Promise<IncomingMediaAttachment | null> {
-  const message = msg.message;
+  const message = unwrapActualMessage(msg.message);
   if (!message) return null;
 
   try {
@@ -19,8 +20,10 @@ export async function extractMediaFromMessage(
       return null;
     }
 
+    const normalizedMsg = getNormalizedWAMessage(msg);
+
     const buffer = await downloadMediaMessage(
-      msg,
+      normalizedMsg,
       'buffer',
       {},
       {

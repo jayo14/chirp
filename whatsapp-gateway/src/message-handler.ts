@@ -2,6 +2,7 @@ import { WAMessage, isJidGroup } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { CONFIG } from './config.js';
 import { extractMediaFromMessage } from './media-handler.js';
+import { unwrapActualMessage } from './message-utils.js';
 import { IncomingWhatsAppMessage } from './types.js';
 import { WebhookClient } from './webhook-client.js';
 
@@ -25,7 +26,9 @@ export class MessageHandler {
 
     const isGroup = !!isJidGroup(remoteJid);
     const senderJid = isGroup ? msg.key.participant || remoteJid : remoteJid;
-    const messageContent = msg.message;
+
+    // Recursively unwrap ephemeral, view-once, and document-with-caption wrappers
+    const messageContent = unwrapActualMessage(msg.message);
 
     if (!messageContent) return;
 
