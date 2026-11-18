@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.app.core.config import settings
 from backend.app.core.database import init_db
+from backend.app.core.exceptions import ChirpException, chirp_exception_handler
 from backend.app.api.router import api_router
 from backend.app.scheduler.job_runner import SchedulerService
 
@@ -49,6 +50,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_exception_handler(ChirpException, chirp_exception_handler)
 
 app.include_router(api_router)
 
