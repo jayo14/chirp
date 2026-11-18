@@ -39,3 +39,14 @@ class SupabaseStorageProvider(StorageProvider):
 
         public_url = f"{self.supabase_url}/storage/v1/object/public/{self.bucket}/{storage_path}"
         return public_url, storage_path
+
+    async def read_file(self, storage_path: str) -> Optional[bytes]:
+        if not self.supabase_url or not self.service_role_key:
+            return None
+        download_url = f"{self.supabase_url}/storage/v1/object/authenticated/{self.bucket}/{storage_path}"
+        headers = {"Authorization": f"Bearer {self.service_role_key}"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(download_url, headers=headers)
+            if resp.status_code == 200:
+                return resp.content
+            return None
