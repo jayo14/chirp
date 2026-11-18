@@ -1,4 +1,4 @@
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr_ready' | 'connected';
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr_ready' | 'connected' | 'logged_out';
 
 export interface GatewayStatus {
   status: ConnectionStatus;

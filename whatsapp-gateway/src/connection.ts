@@ -81,6 +81,7 @@ export class WhatsAppConnection {
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         this.currentStatus.status = 'disconnected';
         this.currentStatus.connectedPhone = null;
+        this.socket = null;
 
         logger.warn(
           { statusCode, shouldReconnect },
@@ -93,8 +94,18 @@ export class WhatsAppConnection {
           logger.info(`Reconnecting in ${delay / 1000} seconds... (attempt ${this.reconnectAttempts})`);
           setTimeout(() => this.connect(), delay);
         } else {
-          logger.error('WhatsApp session logged out. Manual re-authentication with QR code required.');
+          this.currentStatus.status = 'logged_out';
           this.currentStatus.qrCode = null;
+          logger.error('WhatsApp session logged out. Clearing stale auth credentials and generating new QR session.');
+          try {
+            if (fs.existsSync(CONFIG.authDir)) {
+              fs.rmSync(CONFIG.authDir, { recursive: true, force: true });
+            }
+          } catch (cleanErr: any) {
+            logger.warn({ error: cleanErr.message }, 'Failed to remove stale auth directory');
+          }
+          this.reconnectAttempts = 0;
+          setTimeout(() => this.connect(), 2000);
         }
       } else if (connection === 'open') {
         this.reconnectAttempts = 0;
