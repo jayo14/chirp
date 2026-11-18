@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.database import get_db
+from backend.app.core.security import verify_admin_auth
 from backend.app.models.assignment import Assignment, AssignmentStatus
 from backend.app.schemas.assignment import AssignmentOut, AssignmentUpdate
 from backend.app.schemas.admin import AdminApprovalRequest, AdminRejectionRequest
@@ -16,7 +17,10 @@ from backend.app.services.calendar_service import CalendarService
 from fastapi.responses import Response
 
 router = APIRouter(prefix="/api/v1/assignments", tags=["Assignments"])
-review_service = ReviewService()
+
+
+def get_review_service() -> ReviewService:
+    return ReviewService()
 
 
 @router.get("/calendar.ics")
@@ -75,6 +79,8 @@ async def approve_assignment(
     assignment_id: str,
     body: AdminApprovalRequest = AdminApprovalRequest(),
     db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(verify_admin_auth),
+    review_service: ReviewService = Depends(get_review_service),
 ):
     repo = AssignmentRepository(db)
     notif_repo = NotificationRepository(db)
@@ -96,6 +102,8 @@ async def reject_assignment(
     assignment_id: str,
     body: AdminRejectionRequest = AdminRejectionRequest(),
     db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(verify_admin_auth),
+    review_service: ReviewService = Depends(get_review_service),
 ):
     repo = AssignmentRepository(db)
     success, message = await review_service.reject_assignment(

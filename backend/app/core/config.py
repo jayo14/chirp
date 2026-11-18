@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     BACKEND_HOST: str = "0.0.0.0"
     BACKEND_PORT: int = 8000
     BACKEND_SECRET_KEY: str = "chirp-insecure-secret-key-change-in-production"
+    ADMIN_API_KEY: str = "chirp-admin-secret-key-change-in-production"
 
     # Gateway
     WHATSAPP_GATEWAY_URL: str = "http://localhost:3000"

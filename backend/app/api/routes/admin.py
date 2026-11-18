@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
 from backend.app.core.database import get_db
+from backend.app.core.security import verify_admin_auth
 from backend.app.models.notification import NotificationType
 from backend.app.schemas.assignment import AssignmentOut
 from backend.app.repositories.assignment_repo import AssignmentRepository
@@ -14,7 +15,11 @@ from backend.app.repositories.notification_repo import NotificationRepository
 
 from backend.app.services.metrics_service import MetricsService
 
-router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["Admin"],
+    dependencies=[Depends(verify_admin_auth)],
+)
 
 
 class AddAdminRequest(BaseModel):
