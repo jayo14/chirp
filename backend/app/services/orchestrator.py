@@ -134,12 +134,14 @@ class WhatsAppOrchestrator:
         saved_file_url = None
         saved_storage_path = None
         extracted_doc_text = None
+        media_result = None
 
         if payload.media:
             try:
-                saved_file_url, saved_storage_path, extracted_doc_text = (
-                    await self.media_service.process_incoming_media(payload.media)
-                )
+                media_result = await self.media_service.process_incoming_media(payload.media)
+                saved_file_url = media_result.file_url
+                saved_storage_path = media_result.storage_path
+                extracted_doc_text = media_result.extracted_text
             except Exception as e:
                 logger.error(f"Error processing media for message {payload.messageId}: {str(e)}")
 
@@ -253,6 +255,11 @@ class WhatsAppOrchestrator:
         # 7. New Assignment Flow
         media_b64 = payload.media.dataBase64 if payload.media else None
         mime = payload.media.mimeType if payload.media else None
+
+        # For scanned PDFs where digital text is absent, supply rendered page images for vision models
+        if media_result and media_result.is_scanned and media_result.rendered_images:
+            media_b64 = media_result.rendered_images[0]
+            mime = "image/jpeg"
 
         try:
             extracted_info, deadline_utc, needs_clarif = await self.extraction_service.extract(
