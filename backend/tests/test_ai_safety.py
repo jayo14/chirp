@@ -75,7 +75,7 @@ async def test_orchestrator_surfaces_extraction_failure_for_admin_review(test_se
     payload = IncomingWhatsAppWebhook(
         event="message",
         messageId="fail_msg_101",
-        chatJid="123456789-group@g.us",
+        chatJid=settings.CLASS_GROUP_JID,
         senderJid="2348111111111@s.whatsapp.net",
         senderName="Student John",
         isGroup=True,

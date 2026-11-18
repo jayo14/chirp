@@ -74,6 +74,14 @@ class WhatsAppOrchestrator:
             logger.info(f"Message {payload.messageId} already processed. Skipping.")
             return {"status": "skipped", "reason": "already_processed"}
 
+        # 2. Restrict group processing strictly to CLASS_GROUP_JID
+        if payload.isGroup and settings.CLASS_GROUP_JID and payload.chatJid != settings.CLASS_GROUP_JID:
+            logger.info(
+                f"Ignoring message {payload.messageId} from non-target group {payload.chatJid} "
+                f"(configured target: {settings.CLASS_GROUP_JID})"
+            )
+            return {"status": "ignored", "reason": "unmonitored_group"}
+
         # 2. Convert timestamp
         source_ts = datetime.fromtimestamp(payload.timestamp, tz=timezone.utc)
 

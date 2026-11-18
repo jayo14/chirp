@@ -82,3 +82,22 @@ async def test_ordinary_conversation_ignored(test_session, mock_gateway_client):
     result = await orchestrator.handle_incoming_message(webhook_payload, test_session)
     assert result["status"] == "ignored"
     assert result["reason"] == "ordinary_conversation"
+
+
+@pytest.mark.asyncio
+async def test_non_target_group_message_ignored(test_session, mock_gateway_client):
+    orchestrator = WhatsAppOrchestrator(gateway_client=mock_gateway_client)
+
+    webhook_payload = IncomingWhatsAppWebhook(
+        messageId="msg_unrelated_group_001",
+        chatJid="99999999999@g.us",  # Different group from CLASS_GROUP_JID
+        senderJid="2348099999999@s.whatsapp.net",
+        isGroup=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()),
+        text="Assignment 2 for CSC 301 is out, submit by Friday!",
+    )
+
+    result = await orchestrator.handle_incoming_message(webhook_payload, test_session)
+    assert result["status"] == "ignored"
+    assert result["reason"] == "unmonitored_group"
+    assert not mock_gateway_client.send_text.called
