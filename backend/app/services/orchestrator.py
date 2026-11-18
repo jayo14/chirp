@@ -16,6 +16,7 @@ from backend.app.services.assignment_review.review_service import ReviewService
 from backend.app.services.assignment_publishing.publishing_service import PublishingService
 from backend.app.services.deadline_management.deadline_service import DeadlineService
 from backend.app.services.admin_commands.command_service import AdminCommandService
+from backend.app.services.student_commands.student_command_service import StudentCommandService
 from backend.app.integrations.whatsapp_gateway import WhatsAppGatewayClient
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class WhatsAppOrchestrator:
         publishing_service: Optional[PublishingService] = None,
         deadline_service: Optional[DeadlineService] = None,
         admin_command_service: Optional[AdminCommandService] = None,
+        student_command_service: Optional[StudentCommandService] = None,
         gateway_client: Optional[WhatsAppGatewayClient] = None,
     ):
         self.media_service = media_service or MediaService()
@@ -40,6 +42,7 @@ class WhatsAppOrchestrator:
         self.publishing_service = publishing_service or PublishingService()
         self.deadline_service = deadline_service or DeadlineService()
         self.admin_command_service = admin_command_service or AdminCommandService()
+        self.student_command_service = student_command_service or StudentCommandService(self.deadline_service)
         self.gateway_client = gateway_client or WhatsAppGatewayClient()
 
     async def handle_incoming_message(
@@ -59,35 +62,50 @@ class WhatsAppOrchestrator:
         # 2. Convert timestamp
         source_ts = datetime.fromtimestamp(payload.timestamp, tz=timezone.utc)
 
-        # 3. Handle Admin commands
+        # 3. Handle Admin commands and Student queries in private chat
         text_content = payload.full_text
-        if not payload.isGroup and self.admin_command_service.is_command(text_content):
-            reply_text = await self.admin_command_service.handle_command(
-                sender_jid=payload.senderJid,
-                text=text_content,
-                assignment_repo=assignment_repo,
-                admin_repo=admin_repo,
-                notification_repo=notification_repo,
-            )
-            await self.gateway_client.send_text(
-                to=payload.senderJid,
-                text=reply_text,
-                quoted_message_id=payload.messageId,
-            )
-            # Record source
-            await assignment_repo.create_source(
-                message_id=payload.messageId,
-                chat_jid=payload.chatJid,
-                sender_jid=payload.senderJid,
-                sender_name=payload.senderName,
-                is_group=payload.isGroup,
-                is_forwarded=payload.isForwarded,
-                raw_text=payload.text,
-                raw_caption=payload.caption,
-                source_timestamp=source_ts,
-            )
-            await session.commit()
-            return {"status": "command_handled"}
+        if not payload.isGroup:
+            is_admin = await admin_repo.is_admin(payload.senderJid, settings.admin_jid_list)
+            if is_admin and self.admin_command_service.is_command(text_content):
+                reply_text = await self.admin_command_service.handle_command(
+                    sender_jid=payload.senderJid,
+                    text=text_content,
+                    assignment_repo=assignment_repo,
+                    admin_repo=admin_repo,
+                    notification_repo=notification_repo,
+                )
+                await self.gateway_client.send_text(
+                    to=payload.senderJid,
+                    text=reply_text,
+                    quoted_message_id=payload.messageId,
+                )
+                await assignment_repo.create_source(
+                    message_id=payload.messageId,
+                    chat_jid=payload.chatJid,
+                    sender_jid=payload.senderJid,
+                    sender_name=payload.senderName,
+                    is_group=payload.isGroup,
+                    is_forwarded=payload.isForwarded,
+                    raw_text=payload.text,
+                    raw_caption=payload.caption,
+                    source_timestamp=source_ts,
+                )
+                await session.commit()
+                return {"status": "command_handled"}
+
+            elif not is_admin and not payload.media and self.student_command_service.is_student_query(text_content):
+                student_reply = await self.student_command_service.handle_query(
+                    sender_jid=payload.senderJid,
+                    text=text_content,
+                    assignment_repo=assignment_repo,
+                )
+                await self.gateway_client.send_text(
+                    to=payload.senderJid,
+                    text=student_reply,
+                    quoted_message_id=payload.messageId,
+                )
+                await session.commit()
+                return {"status": "student_query_answered"}
 
         # 4. Process Media if present
         saved_file_url = None
