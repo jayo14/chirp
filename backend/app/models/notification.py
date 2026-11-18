@@ -19,10 +19,12 @@ class NotificationType(str, enum.Enum):
     WEEKLY_DIGEST = "weekly_digest"
     ADMIN_REVIEW = "admin_review"
     ASSIGNMENT_UPDATE = "assignment_update"
+    ASSIGNMENT_PUBLICATION = "assignment_publication"
 
 
 class NotificationStatus(str, enum.Enum):
     PENDING = "pending"
+    CLAIMED = "claimed"
     SENT = "sent"
     FAILED = "failed"
     CANCELLED = "cancelled"

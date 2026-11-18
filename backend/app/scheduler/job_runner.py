@@ -60,18 +60,31 @@ class SchedulerService:
             assignment_repo = AssignmentRepository(session)
             settings_repo = SettingsRepository(session)
 
-            # 1. Process due pending notifications (reminders, digests, updates)
-            due_notifications = await notification_repo.get_due_notifications(now_utc)
-            for notif in due_notifications:
-                logger.info(f"Processing due notification {notif.id} ({notif.notification_type})")
-                await self.notification_service.execute_notification(
-                    notification=notif,
-                    notification_repo=notification_repo,
-                    assignment_repo=assignment_repo,
-                )
+            # 0. Recover any notifications stuck in CLAIMED status from previous crashes
+            recovered_count = await notification_repo.recover_stale_claimed(stale_threshold_seconds=300)
+            if recovered_count > 0:
+                logger.info(f"Recovered {recovered_count} stale claimed notifications back to PENDING.")
                 await session.commit()
 
-            # 2. Check if weekly Sunday digest should be queued
+            # 1. Claim due notifications atomically (commits CLAIMED state so DB locks are released)
+            claimed_notifications = await notification_repo.claim_due_notifications(now_utc)
+            await session.commit()
+
+            # 2. Execute claimed notifications (reminders, publications, digests, updates)
+            for notif in claimed_notifications:
+                logger.info(f"Executing notification {notif.id} ({notif.notification_type})")
+                try:
+                    await self.notification_service.execute_notification(
+                        notification=notif,
+                        notification_repo=notification_repo,
+                        assignment_repo=assignment_repo,
+                    )
+                except Exception as e:
+                    logger.error(f"Error executing claimed notification {notif.id}: {e}")
+                    await notification_repo.mark_failed(notif.id, str(e))
+                await session.commit()
+
+            # 3. Check if weekly Sunday digest should be queued
             # Sunday is weekday() == 6
             if now_local.weekday() == 6:
                 target_hour, target_minute = [int(p) for p in settings.WEEKLY_DIGEST_TIME.split(":")]

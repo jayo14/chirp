@@ -42,6 +42,14 @@ async def test_admin_approve_authenticated_with_header_and_bearer(test_session, 
         deadline_at=datetime.now(timezone.utc),
         status=AssignmentStatus.PENDING_REVIEW,
     )
+    assignment2 = await repo.create_assignment(
+        course_code="CSC 302",
+        course_title="Algorithms",
+        title="Queue Task",
+        description="Queue task description",
+        deadline_at=datetime.now(timezone.utc),
+        status=AssignmentStatus.PENDING_REVIEW,
+    )
     await test_session.commit()
 
     async def override_db():
@@ -63,7 +71,7 @@ async def test_admin_approve_authenticated_with_header_and_bearer(test_session, 
 
         # Test Authorization Bearer header on reject
         res_bearer = await client.post(
-            f"/api/v1/assignments/{assignment.short_code}/reject",
+            f"/api/v1/assignments/{assignment2.short_code}/reject",
             json={"reason": "Rejected via bearer token"},
             headers={"Authorization": f"Bearer {settings.ADMIN_API_KEY}"},
         )

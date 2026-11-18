@@ -8,6 +8,7 @@ from backend.app.integrations.whatsapp_gateway import WhatsAppGatewayClient
 from backend.app.services.deadline_management.deadline_service import DeadlineService
 from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.notification_repo import NotificationRepository
+from backend.app.services.assignment_publishing.publishing_service import PublishingService
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +18,14 @@ class NotificationService:
         self,
         gateway_client: Optional[WhatsAppGatewayClient] = None,
         deadline_service: Optional[DeadlineService] = None,
+        publishing_service: Optional[PublishingService] = None,
     ):
         self.gateway_client = gateway_client or WhatsAppGatewayClient()
         self.deadline_service = deadline_service or DeadlineService()
+        self.publishing_service = publishing_service or PublishingService(
+            gateway_client=self.gateway_client,
+            deadline_service=self.deadline_service,
+        )
 
     def format_24h_reminder(self, assignment: Assignment) -> str:
         course_line = f"{assignment.course_code}"
@@ -126,6 +132,33 @@ class NotificationService:
                 else:
                     await notification_repo.mark_failed(notification.id, res.get("error", "Gateway send failed"))
                     return False
+
+            elif notification.notification_type == NotificationType.ASSIGNMENT_PUBLICATION:
+                if not notification.assignment_id:
+                    await notification_repo.mark_failed(notification.id, "Missing assignment ID for publication outbox")
+                    return False
+
+                assignment = await assignment_repo.get_by_id(notification.assignment_id)
+                if not assignment:
+                    await notification_repo.mark_failed(notification.id, f"Assignment {notification.assignment_id} not found")
+                    return False
+
+                if assignment.status in [AssignmentStatus.CANCELLED, AssignmentStatus.REJECTED]:
+                    await notification_repo.cancel_for_assignment(notification.assignment_id)
+                    return False
+
+                if assignment.status == AssignmentStatus.PUBLISHED:
+                    await notification_repo.mark_sent(notification.id, datetime.now(timezone.utc))
+                    return True
+
+                await self.publishing_service.publish_assignment(
+                    assignment=assignment,
+                    assignment_repo=assignment_repo,
+                    notification_repo=notification_repo,
+                    target_group_jid=notification.target_jid,
+                )
+                await notification_repo.mark_sent(notification.id, datetime.now(timezone.utc))
+                return True
 
             return False
         except Exception as e:

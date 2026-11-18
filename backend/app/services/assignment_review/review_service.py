@@ -1,14 +1,17 @@
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from sqlalchemy import update, and_
 from backend.app.core.config import settings
 from backend.app.models.assignment import Assignment, AssignmentStatus
 from backend.app.models.review import ReviewQueue, ReviewStatus
+from backend.app.models.notification import NotificationType
 from backend.app.integrations.whatsapp_gateway import WhatsAppGatewayClient
 from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.admin_repo import AdminRepository
 from backend.app.repositories.notification_repo import NotificationRepository
 from backend.app.services.assignment_publishing.publishing_service import PublishingService
+from backend.app.services.notifications.notification_service import NotificationService
 from backend.app.services.deadline_management.deadline_service import DeadlineService
 
 logger = logging.getLogger(__name__)
@@ -20,12 +23,18 @@ class ReviewService:
         gateway_client: Optional[WhatsAppGatewayClient] = None,
         publishing_service: Optional[PublishingService] = None,
         deadline_service: Optional[DeadlineService] = None,
+        notification_service: Optional[NotificationService] = None,
     ):
         self.gateway_client = gateway_client or WhatsAppGatewayClient()
         self.deadline_service = deadline_service or DeadlineService()
         self.publishing_service = publishing_service or PublishingService(
             gateway_client=self.gateway_client,
             deadline_service=self.deadline_service,
+        )
+        self.notification_service = notification_service or NotificationService(
+            gateway_client=self.gateway_client,
+            deadline_service=self.deadline_service,
+            publishing_service=self.publishing_service,
         )
 
     def format_admin_review_notification(self, assignment: Assignment) -> str:
@@ -80,21 +89,33 @@ class ReviewService:
         if not assignment:
             return False, f"Assignment with ID/code '{identifier}' not found."
 
-        if assignment.status == AssignmentStatus.PUBLISHED:
-            return False, f"Assignment {assignment.course_code} ({assignment.short_code}) is already published."
+        # 1. Atomic status transition: PENDING_REVIEW -> APPROVED
+        # Prevents concurrent double-approvals from creating duplicate publication jobs
+        stmt = (
+            update(Assignment)
+            .where(
+                and_(
+                    Assignment.id == assignment.id,
+                    Assignment.status == AssignmentStatus.PENDING_REVIEW,
+                )
+            )
+            .values(status=AssignmentStatus.APPROVED)
+        )
+        res = await assignment_repo.session.execute(stmt)
+        if res.rowcount == 0:
+            cur = await assignment_repo.get_by_id(assignment.id)
+            cur_status = cur.status.value if cur else "unknown"
+            return False, f"Assignment {assignment.course_code} ({assignment.short_code}) cannot be approved from status '{cur_status}'."
 
-        assignment.status = AssignmentStatus.APPROVED
-        await assignment_repo.session.flush()
+        # 2. Update review record
+        for review_rec in assignment.review_records:
+            if review_rec.status == ReviewStatus.PENDING:
+                review_rec.status = ReviewStatus.APPROVED
+                review_rec.reviewed_by_jid = admin_jid
+                review_rec.reviewed_at = datetime.now(timezone.utc)
+                review_rec.admin_notes = notes
 
-        # Update review record
-        stmt_review = [r for r in assignment.review_records if r.status == ReviewStatus.PENDING]
-        if stmt_review:
-            review_rec = stmt_review[0]
-            review_rec.status = ReviewStatus.APPROVED
-            review_rec.reviewed_by_jid = admin_jid
-            review_rec.reviewed_at = datetime.now(timezone.utc)
-            review_rec.admin_notes = notes
-
+        # 3. Log audit trail
         await assignment_repo.log_audit(
             assignment_id=assignment.id,
             action="approved",
@@ -102,14 +123,31 @@ class ReviewService:
             new_state={"notes": notes},
         )
 
-        # Trigger publishing to group
-        await self.publishing_service.publish_assignment(
-            assignment=assignment,
-            assignment_repo=assignment_repo,
-            notification_repo=notification_repo,
+        # 4. Outbox pattern: Persist publication event in the same DB transaction
+        now_utc = datetime.now(timezone.utc)
+        outbox_event = await notification_repo.create_notification(
+            notification_type=NotificationType.ASSIGNMENT_PUBLICATION,
+            target_jid=settings.CLASS_GROUP_JID,
+            scheduled_for=now_utc,
+            assignment_id=assignment.id,
+            payload={"admin_jid": admin_jid, "notes": notes},
         )
+        await assignment_repo.session.flush()
 
-        return True, f"✅ Assignment {assignment.course_code} ({assignment.short_code}) approved and published to class group!"
+        # 5. Immediate best-effort decoupled dispatch
+        try:
+            executed = await self.notification_service.execute_notification(
+                notification=outbox_event,
+                notification_repo=notification_repo,
+                assignment_repo=assignment_repo,
+            )
+            if executed:
+                return True, f"✅ Assignment {assignment.course_code} ({assignment.short_code}) approved and published to class group!"
+            else:
+                return True, f"✅ Assignment {assignment.course_code} ({assignment.short_code}) approved and queued for publication!"
+        except Exception as e:
+            logger.warning(f"Immediate publication outbox dispatch deferred: {str(e)}")
+            return True, f"✅ Assignment {assignment.course_code} ({assignment.short_code}) approved and queued for publication!"
 
     async def reject_assignment(
         self,
@@ -122,16 +160,29 @@ class ReviewService:
         if not assignment:
             return False, f"Assignment with ID/code '{identifier}' not found."
 
-        assignment.status = AssignmentStatus.REJECTED
-        await assignment_repo.session.flush()
+        # Atomic status transition: PENDING_REVIEW -> REJECTED
+        stmt = (
+            update(Assignment)
+            .where(
+                and_(
+                    Assignment.id == assignment.id,
+                    Assignment.status == AssignmentStatus.PENDING_REVIEW,
+                )
+            )
+            .values(status=AssignmentStatus.REJECTED)
+        )
+        res = await assignment_repo.session.execute(stmt)
+        if res.rowcount == 0:
+            cur = await assignment_repo.get_by_id(assignment.id)
+            cur_status = cur.status.value if cur else "unknown"
+            return False, f"Assignment {assignment.course_code} ({assignment.short_code}) cannot be rejected from status '{cur_status}'."
 
-        stmt_review = [r for r in assignment.review_records if r.status == ReviewStatus.PENDING]
-        if stmt_review:
-            review_rec = stmt_review[0]
-            review_rec.status = ReviewStatus.REJECTED
-            review_rec.reviewed_by_jid = admin_jid
-            review_rec.reviewed_at = datetime.now(timezone.utc)
-            review_rec.admin_notes = reason
+        for review_rec in assignment.review_records:
+            if review_rec.status == ReviewStatus.PENDING:
+                review_rec.status = ReviewStatus.REJECTED
+                review_rec.reviewed_by_jid = admin_jid
+                review_rec.reviewed_at = datetime.now(timezone.utc)
+                review_rec.admin_notes = reason
 
         await assignment_repo.log_audit(
             assignment_id=assignment.id,
