@@ -75,6 +75,7 @@ class AdminCommandService:
                 "• `/pending` - View assignments waiting for approval\n"
                 "• `/approve <ID>` - Approve and publish assignment\n"
                 "• `/reject <ID> [reason]` - Reject assignment candidate\n"
+                "• `/cancel <ID> [reason]` - Cancel an assignment and broadcast to class\n"
                 "• `/edit <ID> title=... deadline=YYYY-MM-DD` - Edit assignment\n"
                 "• `/upcoming` - View upcoming active assignments\n"
                 "• `/assignments` - List recent tracked assignments\n"
@@ -117,6 +118,61 @@ class AdminCommandService:
                 reason=reason,
             )
             return msg
+
+        elif cmd == "cancel":
+            if len(parts) < 2:
+                return "⚠️ Please specify assignment code or ID. Example: `/cancel A1B2 Lecturer announced cancellation`"
+            code = parts[1]
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "No submission required."
+
+            assignment = await assignment_repo.get_by_id_or_short_code(code)
+            if not assignment:
+                return f"Assignment with ID '{code}' not found."
+
+            if assignment.status == AssignmentStatus.CANCELLED:
+                return f"⚠️ Assignment {assignment.course_code} ({assignment.short_code}) is already cancelled."
+
+            was_published = assignment.status in [AssignmentStatus.PUBLISHED, AssignmentStatus.UPDATED]
+
+            assignment.status = AssignmentStatus.CANCELLED
+            await notification_repo.cancel_for_assignment(assignment.id)
+            await assignment_repo.session.flush()
+
+            await assignment_repo.log_audit(
+                assignment_id=assignment.id,
+                action="cancelled",
+                actor_jid=sender_jid,
+                new_state={"reason": reason},
+            )
+
+            if was_published:
+                cancel_text = (
+                    f"⚠️ *ASSIGNMENT CANCELLED*\n\n"
+                    f"The assignment for *{assignment.course_code}"
+                    + (f" – {assignment.course_title}*" if assignment.course_title else "*")
+                    + f" ({assignment.title}) has been cancelled.\n"
+                    f"No submission is required.\n\n"
+                    f"_Reason: {reason}_"
+                )
+                cancel_notif = await notification_repo.create_notification(
+                    notification_type=NotificationType.ASSIGNMENT_UPDATE,
+                    target_jid=settings.CLASS_GROUP_JID,
+                    scheduled_for=datetime.now(timezone.utc),
+                    assignment_id=assignment.id,
+                    payload={"text": cancel_text},
+                )
+                try:
+                    await self.review_service.notification_service.execute_notification(
+                        notification=cancel_notif,
+                        notification_repo=notification_repo,
+                        assignment_repo=assignment_repo,
+                    )
+                except Exception as e:
+                    logger.warning(f"Immediate cancellation broadcast deferred: {str(e)}")
+
+                return f"⚠️ Assignment {assignment.course_code} ({assignment.short_code}) has been cancelled and announced to the class group."
+            else:
+                return f"⚠️ Pending assignment candidate {assignment.course_code} ({assignment.short_code}) cancelled."
 
         elif cmd == "edit":
             if len(parts) < 3:

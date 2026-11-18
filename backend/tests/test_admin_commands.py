@@ -173,3 +173,53 @@ async def test_admin_edit_published_assignment_broadcasts_update(test_session, m
     assert broadcast_call is not None
     assert broadcast_call["to"] == settings.CLASS_GROUP_JID
     assert "Consensus Lab" in broadcast_call["text"]
+
+
+@pytest.mark.asyncio
+async def test_admin_cancel_published_assignment(test_session, mock_gateway_client):
+    admin_jid = "2348012345678@s.whatsapp.net"
+    assign_repo = AssignmentRepository(test_session)
+    admin_repo = AdminRepository(test_session)
+    notif_repo = NotificationRepository(test_session)
+    await admin_repo.add_admin(admin_jid, name="Class Rep")
+
+    review_service = ReviewService(gateway_client=mock_gateway_client)
+    cmd_service = AdminCommandService(review_service=review_service)
+
+    assignment = await assign_repo.create_assignment(
+        course_code="CSC 405",
+        course_title="Compiler Construction",
+        title="Parser Assignment",
+        description="Write an LR parser",
+        deadline_at=datetime.now(timezone.utc),
+        status=AssignmentStatus.PUBLISHED,
+    )
+    # Schedule a reminder
+    await notif_repo.create_notification(
+        notification_type="reminder_24h",
+        target_jid=settings.CLASS_GROUP_JID,
+        scheduled_for=datetime.now(timezone.utc),
+        assignment_id=assignment.id,
+    )
+    await test_session.commit()
+
+    res = await cmd_service.handle_command(
+        sender_jid=admin_jid,
+        text=f"/cancel {assignment.short_code} Lecturer called off homework",
+        assignment_repo=assign_repo,
+        admin_repo=admin_repo,
+        notification_repo=notif_repo,
+    )
+
+    assert "cancelled and announced" in res.lower()
+    await test_session.refresh(assignment)
+    assert assignment.status == AssignmentStatus.CANCELLED
+
+    # Verify announcement was sent
+    assert mock_gateway_client.send_text.called
+    calls = [c[1] for c in mock_gateway_client.send_text.call_args_list]
+    cancel_call = next((c for c in calls if "ASSIGNMENT CANCELLED" in c.get("text", "")), None)
+    assert cancel_call is not None
+    assert cancel_call["to"] == settings.CLASS_GROUP_JID
+    assert "Parser Assignment" in cancel_call["text"]
+    assert "Lecturer called off homework" in cancel_call["text"]
