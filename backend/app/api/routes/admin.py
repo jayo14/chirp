@@ -12,6 +12,8 @@ from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.admin_repo import AdminRepository
 from backend.app.repositories.notification_repo import NotificationRepository
 
+from backend.app.services.metrics_service import MetricsService
+
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
 
@@ -19,6 +21,16 @@ class AddAdminRequest(BaseModel):
     phone_or_jid: str
     name: Optional[str] = None
     role: str = "admin"
+
+
+@router.get("/metrics")
+async def get_system_metrics(db: AsyncSession = Depends(get_db)):
+    """
+    Returns metrics tracking PRD success indicators:
+    detection counts, delivery reliability, duplicate prevention rate.
+    """
+    metrics_service = MetricsService(db)
+    return await metrics_service.get_metrics_summary()
 
 
 @router.get("/pending", response_model=List[AssignmentOut])
