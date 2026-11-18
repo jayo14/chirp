@@ -207,3 +207,50 @@ async def test_media_grouping_does_not_combine_conflicting_courses(test_session,
     assert res2["status"] == "queued_for_review"
     # Separate assignment was created!
     assert res2["assignment_id"] != res1["assignment_id"]
+
+
+@pytest.mark.asyncio
+async def test_student_private_assignment_forwarding(test_session, mock_gateway_client):
+    from backend.app.repositories.admin_repo import AdminRepository
+    from backend.app.services.assignment_review.review_service import ReviewService
+
+    admin_repo = AdminRepository(test_session)
+    await admin_repo.add_admin("2348000000000@s.whatsapp.net", name="Class Rep")
+    await test_session.commit()
+
+    review_service = ReviewService(gateway_client=mock_gateway_client)
+    orchestrator = WhatsAppOrchestrator(
+        review_service=review_service,
+        gateway_client=mock_gateway_client,
+    )
+
+    # Student forwards assignment in private 1-on-1 chat with bot
+    student_jid = "2348099887766@s.whatsapp.net"
+    msg = IncomingWhatsAppWebhook(
+        messageId="msg_pvt_fwd_001",
+        chatJid=student_jid,
+        senderJid=student_jid,
+        senderName="Ade",
+        isGroup=False,
+        isForwarded=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()),
+        text="Assignment: CSC 301 Write a doubly linked list in C. Due Friday.",
+    )
+
+    res = await orchestrator.handle_incoming_message(msg, test_session)
+    assert res["status"] == "queued_for_review"
+    assert res["course"] == "CSC 301"
+
+    # Verify both:
+    # 1. Admin was notified for review
+    # 2. Student received acknowledgement in private chat
+    assert mock_gateway_client.send_text.called
+    calls = [c[1] for c in mock_gateway_client.send_text.call_args_list]
+
+    admin_call = next((c for c in calls if c["to"] == "2348000000000@s.whatsapp.net"), None)
+    assert admin_call is not None
+    assert "CSC 301" in admin_call["text"]
+
+    student_call = next((c for c in calls if c["to"] == student_jid), None)
+    assert student_call is not None
+    assert "Assignment Received" in student_call["text"]

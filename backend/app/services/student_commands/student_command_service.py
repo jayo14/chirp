@@ -12,23 +12,28 @@ class StudentCommandService:
     def __init__(self, deadline_service: Optional[DeadlineService] = None):
         self.deadline_service = deadline_service or DeadlineService()
 
-    def is_student_query(self, text: str) -> bool:
-        if not text:
+    def is_student_query(self, text: str, is_forwarded: bool = False) -> bool:
+        if not text or is_forwarded:
             return False
         clean = text.strip().lower()
         if clean.startswith("/") or clean.startswith("!"):
             return True
-        keywords = [
-            "assignment",
-            "assignments",
-            "upcoming",
-            "deadline",
-            "deadlines",
-            "homework",
+
+        query_phrases = [
+            "do we have",
             "what do we have",
-            "due date",
+            "any assignment",
+            "any upcoming",
+            "what assignment",
+            "what homework",
+            "list assignment",
+            "show assignment",
+            "are there any",
+            "when is the deadline",
+            "what is due",
+            "is there any homework",
         ]
-        return any(k in clean for k in keywords)
+        return any(phrase in clean for phrase in query_phrases)
 
     async def handle_query(
         self,

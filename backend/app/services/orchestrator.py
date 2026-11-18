@@ -117,7 +117,7 @@ class WhatsAppOrchestrator:
                 await session.commit()
                 return {"status": "command_handled"}
 
-            elif not is_admin and not payload.media and self.student_command_service.is_student_query(text_content):
+            elif not is_admin and not payload.media and self.student_command_service.is_student_query(text_content, is_forwarded=payload.isForwarded):
                 student_reply = await self.student_command_service.handle_query(
                     sender_jid=payload.senderJid,
                     text=text_content,
@@ -399,6 +399,24 @@ class WhatsAppOrchestrator:
             assignment=assignment,
             admin_repo=admin_repo,
         )
+
+        # If forwarded privately by a student, send receipt acknowledgement
+        if not payload.isGroup:
+            is_admin = await admin_repo.is_admin(payload.senderJid, settings.admin_jid_list)
+            if not is_admin:
+                ack_msg = (
+                    f"📥 *Assignment Received*\n\n"
+                    f"Thanks for forwarding! The assignment for *{assignment.course_code}* "
+                    f"has been queued for review by the class administrator."
+                )
+                try:
+                    await self.gateway_client.send_text(
+                        to=payload.senderJid,
+                        text=ack_msg,
+                        quoted_message_id=payload.messageId,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send acknowledgement to private sender {payload.senderJid}: {str(e)}")
 
         return {
             "status": "queued_for_review",
