@@ -1,4 +1,6 @@
+import pytest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from backend.app.models.assignment import Assignment, AssignmentStatus
 from backend.app.services.notifications.notification_service import NotificationService
 from backend.app.services.deadline_management.deadline_service import DeadlineService
@@ -60,3 +62,59 @@ def test_empty_weekly_digest_format():
     service = NotificationService()
     formatted = service.format_weekly_digest([])
     assert "no outstanding assignments" in formatted
+
+
+@pytest.mark.asyncio
+async def test_sunday_after_target_hour_queues_weekly_digest(test_engine, test_session, mock_gateway_client):
+    import pytz
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from backend.app.core.config import settings
+    from backend.app.scheduler.job_runner import SchedulerService
+    from backend.app.models.notification import ScheduledNotification, NotificationType
+
+    session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+    scheduler = SchedulerService(session_maker=session_factory)
+    # Sunday at 21:30 WAT (Africa/Lagos) -> 20:30 UTC
+    tz = pytz.timezone("Africa/Lagos")
+    sunday_2130 = tz.localize(datetime(2026, 11, 22, 21, 30, 0))
+
+    # Mock datetime.now in job_runner tick
+    with patch("backend.app.scheduler.job_runner.datetime") as mock_dt:
+        mock_dt.now.return_value = sunday_2130.astimezone(timezone.utc)
+        await scheduler.tick()
+
+    # Verify notification queued
+    stmt = select(ScheduledNotification).where(
+        ScheduledNotification.notification_type == NotificationType.WEEKLY_DIGEST
+    )
+    res = list((await test_session.execute(stmt)).scalars().all())
+    assert len(res) == 1
+    assert res[0].target_jid == settings.CLASS_GROUP_JID
+
+
+@pytest.mark.asyncio
+async def test_monday_catchup_weekly_digest(test_engine, test_session, mock_gateway_client):
+    import pytz
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from backend.app.core.config import settings
+    from backend.app.scheduler.job_runner import SchedulerService
+    from backend.app.models.notification import ScheduledNotification, NotificationType
+
+    session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+    scheduler = SchedulerService(session_maker=session_factory)
+    # Monday at 09:15 AM WAT (Africa/Lagos)
+    tz = pytz.timezone("Africa/Lagos")
+    monday_0915 = tz.localize(datetime(2026, 11, 23, 9, 15, 0))
+
+    with patch("backend.app.scheduler.job_runner.datetime") as mock_dt:
+        mock_dt.now.return_value = monday_0915.astimezone(timezone.utc)
+        await scheduler.tick()
+
+    stmt = select(ScheduledNotification).where(
+        ScheduledNotification.notification_type == NotificationType.WEEKLY_DIGEST
+    )
+    res = list((await test_session.execute(stmt)).scalars().all())
+    assert len(res) == 1
+

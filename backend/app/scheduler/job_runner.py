@@ -18,9 +18,11 @@ class SchedulerService:
         self,
         notification_service: NotificationService = None,
         interval_seconds: int = settings.SCHEDULER_INTERVAL_SECONDS,
+        session_maker = None,
     ):
         self.notification_service = notification_service or NotificationService()
         self.interval_seconds = interval_seconds
+        self.session_maker = session_maker or async_session_maker
         self.running = False
         self._task: asyncio.Task = None
         self.tz = pytz.timezone(settings.TIMEZONE)
@@ -55,7 +57,7 @@ class SchedulerService:
         now_utc = datetime.now(timezone.utc)
         now_local = now_utc.astimezone(self.tz)
 
-        async with async_session_maker() as session:
+        async with self.session_maker() as session:
             notification_repo = NotificationRepository(session)
             assignment_repo = AssignmentRepository(session)
             settings_repo = SettingsRepository(session)
@@ -85,19 +87,32 @@ class SchedulerService:
                 await session.commit()
 
             # 3. Check if weekly Sunday digest should be queued
-            # Sunday is weekday() == 6
-            if now_local.weekday() == 6:
-                target_hour, target_minute = [int(p) for p in settings.WEEKLY_DIGEST_TIME.split(":")]
-                if now_local.hour == target_hour and now_local.minute >= target_minute:
-                    week_key = f"weekly_digest_sent_{now_local.strftime('%Y_%U')}"
-                    already_sent = await settings_repo.get(week_key)
+            # Standard schedule: Sunday (weekday == 6) at or after WEEKLY_DIGEST_TIME
+            # Catch-up schedule: Monday (weekday == 0) before 12:00 PM if missed due to downtime
+            target_hour, target_minute = [int(p) for p in settings.WEEKLY_DIGEST_TIME.split(":")]
+            is_sunday_due = (
+                now_local.weekday() == 6
+                and (
+                    now_local.hour > target_hour
+                    or (now_local.hour == target_hour and now_local.minute >= target_minute)
+                )
+            )
+            is_monday_catchup = (
+                now_local.weekday() == 0
+                and now_local.hour < 12
+            )
 
-                    if not already_sent:
-                        logger.info(f"Queuing weekly digest for week {now_local.strftime('%Y_%U')}")
-                        await notification_repo.create_notification(
-                            notification_type=NotificationType.WEEKLY_DIGEST,
-                            target_jid=settings.CLASS_GROUP_JID,
-                            scheduled_for=now_utc,
-                        )
-                        await settings_repo.set(week_key, "true", description="Tracks if Sunday digest was sent")
-                        await session.commit()
+            if is_sunday_due or is_monday_catchup:
+                week_key = f"weekly_digest_sent_{now_local.strftime('%Y_%U')}"
+                already_sent = await settings_repo.get(week_key)
+
+                if not already_sent:
+                    mode = "catch-up" if is_monday_catchup else "scheduled"
+                    logger.info(f"Queuing {mode} weekly digest for week {now_local.strftime('%Y_%U')}")
+                    await notification_repo.create_notification(
+                        notification_type=NotificationType.WEEKLY_DIGEST,
+                        target_jid=settings.CLASS_GROUP_JID,
+                        scheduled_for=now_utc,
+                    )
+                    await settings_repo.set(week_key, "true", description="Tracks if weekly digest was sent")
+                    await session.commit()
