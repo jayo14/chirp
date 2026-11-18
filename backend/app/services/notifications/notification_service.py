@@ -50,6 +50,7 @@ class NotificationService:
                 "Enjoy your week and stay prepared!"
             )
 
+        now_utc = datetime.now(timezone.utc)
         items_text = []
         for idx, assign in enumerate(upcoming_assignments):
             c_line = f"*{idx + 1}. {assign.course_code}"
@@ -61,7 +62,21 @@ class NotificationService:
             desc_brief = assign.description.split("\n")[0][:120].strip()
             deadline_str = self.deadline_service.format_deadline_for_display(assign.deadline_at)
 
-            item = f"{c_line}\n\n{desc_brief}\n\nDeadline: {deadline_str}."
+            # Remaining time calculation per PRD section 4.9
+            remaining_str = ""
+            if assign.deadline_at:
+                diff = assign.deadline_at - now_utc
+                total_secs = int(diff.total_seconds())
+                if total_secs > 86400:
+                    days = total_secs // 86400
+                    remaining_str = f" (in {days} days)"
+                elif total_secs > 0:
+                    hours = total_secs // 3600
+                    remaining_str = f" (in {hours} hours)"
+                else:
+                    remaining_str = " (due today)"
+
+            item = f"{c_line}\n\n{desc_brief}\n\nDeadline: {deadline_str}{remaining_str}."
             items_text.append(item)
 
         joined_items = "\n\n".join(items_text)
