@@ -22,8 +22,11 @@ class ReviewService:
         deadline_service: Optional[DeadlineService] = None,
     ):
         self.gateway_client = gateway_client or WhatsAppGatewayClient()
-        self.publishing_service = publishing_service or PublishingService()
         self.deadline_service = deadline_service or DeadlineService()
+        self.publishing_service = publishing_service or PublishingService(
+            gateway_client=self.gateway_client,
+            deadline_service=self.deadline_service,
+        )
 
     def format_admin_review_notification(self, assignment: Assignment) -> str:
         deadline_str = self.deadline_service.format_deadline_for_display(assignment.deadline_at)
