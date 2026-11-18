@@ -1,4 +1,5 @@
 from typing import List, Optional
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -11,9 +12,27 @@ from backend.app.schemas.admin import AdminApprovalRequest, AdminRejectionReques
 from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.notification_repo import NotificationRepository
 from backend.app.services.assignment_review.review_service import ReviewService
+from backend.app.services.calendar_service import CalendarService
+from fastapi.responses import Response
 
 router = APIRouter(prefix="/api/v1/assignments", tags=["Assignments"])
 review_service = ReviewService()
+
+
+@router.get("/calendar.ics")
+async def get_assignments_calendar_feed(db: AsyncSession = Depends(get_db)):
+    """
+    Subscribable iCalendar feed (.ics) for Google Calendar, Apple Calendar, Outlook.
+    """
+    repo = AssignmentRepository(db)
+    now_utc = datetime.now(timezone.utc)
+    upcoming = await repo.list_active_upcoming(now_utc)
+    ics_content = CalendarService.generate_ics(upcoming)
+    return Response(
+        content=ics_content,
+        media_type="text/calendar",
+        headers={"Content-Disposition": 'inline; filename="assignments.ics"'},
+    )
 
 
 @router.get("", response_model=List[AssignmentOut])
