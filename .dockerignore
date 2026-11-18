@@ -1,0 +1,36 @@
+# Git & CI
+.git
+.github
+.gitignore
+
+# Python virtualenvs, caches, tests
+backend/.venv
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache
+htmlcov
+.coverage
+
+# Node & Gateway
+**/node_modules
+**/dist
+whatsapp-gateway/auth_info_baileys
+*.session
+
+# Local database & uploads
+*.db
+*.db-journal
+chirp.db
+backend/chirp.db
+uploads/
+backend/uploads
+
+# Env secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
