@@ -25,6 +25,14 @@ class UnauthorizedAdminException(ChirpException):
         )
 
 
+class AIExtractionException(ChirpException):
+    def __init__(self, message: str):
+        super().__init__(
+            message=message,
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
+
+
 async def chirp_exception_handler(request: Request, exc: ChirpException) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,

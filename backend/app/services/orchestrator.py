@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
 from backend.app.schemas.webhook import IncomingWhatsAppWebhook
+from backend.app.schemas.assignment import AssignmentClassification, ExtractedAssignmentInfo
 from backend.app.models.assignment import AssignmentStatus
 from backend.app.repositories.assignment_repo import AssignmentRepository
 from backend.app.repositories.admin_repo import AdminRepository
@@ -35,15 +36,29 @@ class WhatsAppOrchestrator:
         student_command_service: Optional[StudentCommandService] = None,
         gateway_client: Optional[WhatsAppGatewayClient] = None,
     ):
+        self.gateway_client = gateway_client or WhatsAppGatewayClient()
+        self.deadline_service = deadline_service or DeadlineService()
         self.media_service = media_service or MediaService()
         self.detection_service = detection_service or DetectionService()
-        self.extraction_service = extraction_service or ExtractionService()
-        self.review_service = review_service or ReviewService()
-        self.publishing_service = publishing_service or PublishingService()
-        self.deadline_service = deadline_service or DeadlineService()
-        self.admin_command_service = admin_command_service or AdminCommandService()
-        self.student_command_service = student_command_service or StudentCommandService(self.deadline_service)
-        self.gateway_client = gateway_client or WhatsAppGatewayClient()
+        self.extraction_service = extraction_service or ExtractionService(
+            deadline_service=self.deadline_service
+        )
+        self.publishing_service = publishing_service or PublishingService(
+            gateway_client=self.gateway_client,
+            deadline_service=self.deadline_service,
+        )
+        self.review_service = review_service or ReviewService(
+            gateway_client=self.gateway_client,
+            publishing_service=self.publishing_service,
+            deadline_service=self.deadline_service,
+        )
+        self.admin_command_service = admin_command_service or AdminCommandService(
+            review_service=self.review_service,
+            deadline_service=self.deadline_service,
+        )
+        self.student_command_service = student_command_service or StudentCommandService(
+            deadline_service=self.deadline_service
+        )
 
     async def handle_incoming_message(
         self,
@@ -121,10 +136,22 @@ class WhatsAppOrchestrator:
                 logger.error(f"Error processing media for message {payload.messageId}: {str(e)}")
 
         # 5. Detect Assignment Intent
-        classification = await self.detection_service.detect_assignment_intent(
-            text=text_content,
-            has_media=bool(payload.media),
-        )
+        try:
+            classification = await self.detection_service.detect_assignment_intent(
+                text=text_content,
+                has_media=bool(payload.media),
+            )
+        except Exception as e:
+            logger.error(f"Classification failed for message {payload.messageId}: {str(e)}")
+            lower_text = text_content.lower() if text_content else ""
+            keywords = ["assignment", "homework", "due date", "submission", "deadline", "submit", "project"]
+            is_candidate = bool(payload.media) or any(k in lower_text for k in keywords)
+            classification = AssignmentClassification(
+                is_assignment_candidate=is_candidate,
+                classification_type="new_assignment" if is_candidate else "ordinary_conversation",
+                confidence=0.0,
+                reasoning=f"AI classification failed; heuristic fallback applied: {str(e)}",
+            )
 
         logger.info(
             f"Classification for message {payload.messageId}: type={classification.classification_type}, "
@@ -219,12 +246,28 @@ class WhatsAppOrchestrator:
         media_b64 = payload.media.dataBase64 if payload.media else None
         mime = payload.media.mimeType if payload.media else None
 
-        extracted_info, deadline_utc, needs_clarif = await self.extraction_service.extract(
-            text=text_content,
-            media_base64=media_b64,
-            mime_type=mime,
-            extracted_doc_text=extracted_doc_text,
-        )
+        try:
+            extracted_info, deadline_utc, needs_clarif = await self.extraction_service.extract(
+                text=text_content,
+                media_base64=media_b64,
+                mime_type=mime,
+                extracted_doc_text=extracted_doc_text,
+            )
+        except Exception as e:
+            logger.error(f"Extraction failed for message {payload.messageId}: {str(e)}. Surfacing for manual admin review.")
+            extracted_info = ExtractedAssignmentInfo(
+                course_code="MANUAL_REVIEW",
+                course_title="AI Extraction Error",
+                assignment_title=f"Unparsed Assignment from {payload.senderName or payload.senderJid}",
+                description=f"Automated AI extraction failed ({type(e).__name__}: {str(e)}).\n\nOriginal Text:\n{text_content}",
+                questions=[],
+                submission_instructions="Please edit or verify this assignment manually via /edit or the admin panel.",
+                deadline_iso=None,
+                deadline_clarification_needed=True,
+                confidence=0.0,
+            )
+            deadline_utc = None
+            needs_clarif = True
 
         assignment = await assignment_repo.create_assignment(
             course_code=extracted_info.course_code,
