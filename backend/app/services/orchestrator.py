@@ -1,3 +1,4 @@
+import re
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -144,6 +145,67 @@ class WhatsAppOrchestrator:
                 extracted_doc_text = media_result.extracted_text
             except Exception as e:
                 logger.error(f"Error processing media for message {payload.messageId}: {str(e)}")
+
+        # 4b. Multi-image debouncing & grouping with ambiguity detection
+        if payload.media and saved_file_url and saved_storage_path:
+            recent_pending = await assignment_repo.find_recent_pending_from_sender(
+                sender_jid=payload.senderJid,
+                chat_jid=payload.chatJid,
+                window_seconds=10,
+            )
+            if recent_pending:
+                has_text = bool(text_content and text_content.strip())
+                conflicting_course = False
+                if has_text and recent_pending.course_code:
+                    recent_clean = re.sub(r"\s+", "", recent_pending.course_code).upper()
+                    found_courses = re.findall(r"\b[A-Za-z]{2,4}\s*\d{3,4}\b", text_content)
+                    for found in found_courses:
+                        found_clean = re.sub(r"\s+", "", found).upper()
+                        if found_clean != recent_clean:
+                            conflicting_course = True
+                            break
+
+                if not conflicting_course:
+                    source_record = await assignment_repo.create_source(
+                        message_id=payload.messageId,
+                        chat_jid=payload.chatJid,
+                        sender_jid=payload.senderJid,
+                        sender_name=payload.senderName,
+                        is_group=payload.isGroup,
+                        is_forwarded=payload.isForwarded,
+                        raw_text=payload.text,
+                        raw_caption=payload.caption,
+                        source_timestamp=source_ts,
+                        assignment_id=recent_pending.id,
+                    )
+                    await assignment_repo.add_attachment(
+                        assignment_id=recent_pending.id,
+                        source_id=source_record.id,
+                        file_name=payload.media.fileName or "additional_attachment",
+                        file_url=saved_file_url,
+                        storage_path=saved_storage_path,
+                        mime_type=payload.media.mimeType,
+                        file_size=payload.media.fileSize,
+                        extracted_text=extracted_doc_text,
+                    )
+                    if has_text:
+                        recent_pending.description += f"\n\n[Additional Note]:\n{text_content}"
+
+                    await assignment_repo.log_audit(
+                        assignment_id=recent_pending.id,
+                        action="attachment_grouped",
+                        actor_jid=payload.senderJid,
+                        new_state={"source_message_id": payload.messageId},
+                    )
+                    await session.commit()
+                    logger.info(
+                        f"Grouped media message {payload.messageId} into pending assignment {recent_pending.short_code}"
+                    )
+                    return {
+                        "status": "media_grouped",
+                        "assignment_id": recent_pending.id,
+                        "short_code": recent_pending.short_code,
+                    }
 
         # 5. Detect Assignment Intent
         try:

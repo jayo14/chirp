@@ -101,3 +101,109 @@ async def test_non_target_group_message_ignored(test_session, mock_gateway_clien
     assert result["status"] == "ignored"
     assert result["reason"] == "unmonitored_group"
     assert not mock_gateway_client.send_text.called
+
+
+@pytest.mark.asyncio
+async def test_multi_image_media_grouping(test_session, mock_gateway_client):
+    import base64
+    from backend.app.schemas.webhook import IncomingMediaInfo
+    from backend.app.core.config import settings
+
+    orchestrator = WhatsAppOrchestrator(gateway_client=mock_gateway_client)
+    sample_b64 = base64.b64encode(b"fake image bytes page 1").decode("ascii")
+
+    # 1. First image with assignment caption
+    msg1 = IncomingWhatsAppWebhook(
+        messageId="msg_album_001",
+        chatJid=settings.CLASS_GROUP_JID,
+        senderJid="2348011112222@s.whatsapp.net",
+        isGroup=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()),
+        text="Assignment in CSC 301 on Graph Algorithms. Page 1 attached.",
+        media=IncomingMediaInfo(
+            mimeType="image/jpeg",
+            fileName="page1.jpg",
+            fileSize=len(sample_b64),
+            dataBase64=sample_b64,
+        ),
+    )
+
+    res1 = await orchestrator.handle_incoming_message(msg1, test_session)
+    assert res1["status"] == "queued_for_review"
+    assign_id = res1["assignment_id"]
+
+    # 2. Second image sent 1 second later with no caption (continuation page)
+    sample2_b64 = base64.b64encode(b"fake image bytes page 2").decode("ascii")
+    msg2 = IncomingWhatsAppWebhook(
+        messageId="msg_album_002",
+        chatJid=settings.CLASS_GROUP_JID,
+        senderJid="2348011112222@s.whatsapp.net",
+        isGroup=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()) + 1,
+        text="",
+        media=IncomingMediaInfo(
+            mimeType="image/jpeg",
+            fileName="page2.jpg",
+            fileSize=len(sample2_b64),
+            dataBase64=sample2_b64,
+        ),
+    )
+
+    res2 = await orchestrator.handle_incoming_message(msg2, test_session)
+    assert res2["status"] == "media_grouped"
+    assert res2["assignment_id"] == assign_id
+
+    # Verify assignment has 2 attachments in DB
+    assign_repo = AssignmentRepository(test_session)
+    assign = await assign_repo.get_by_id(assign_id)
+    assert len(assign.attachments) == 2
+    assert {a.file_name for a in assign.attachments} == {"page1.jpg", "page2.jpg"}
+
+
+@pytest.mark.asyncio
+async def test_media_grouping_does_not_combine_conflicting_courses(test_session, mock_gateway_client):
+    import base64
+    from backend.app.schemas.webhook import IncomingMediaInfo
+    from backend.app.core.config import settings
+
+    orchestrator = WhatsAppOrchestrator(gateway_client=mock_gateway_client)
+    sample_b64 = base64.b64encode(b"fake image bytes").decode("ascii")
+
+    msg1 = IncomingWhatsAppWebhook(
+        messageId="msg_diff_001",
+        chatJid=settings.CLASS_GROUP_JID,
+        senderJid="2348011112222@s.whatsapp.net",
+        isGroup=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()),
+        text="CSC 301 Assignment 1",
+        media=IncomingMediaInfo(
+            mimeType="image/jpeg",
+            fileName="csc301.jpg",
+            fileSize=len(sample_b64),
+            dataBase64=sample_b64,
+        ),
+    )
+
+    res1 = await orchestrator.handle_incoming_message(msg1, test_session)
+    assert res1["status"] == "queued_for_review"
+
+    # Message 2 mentions MTH 202 explicitly
+    msg2 = IncomingWhatsAppWebhook(
+        messageId="msg_diff_002",
+        chatJid=settings.CLASS_GROUP_JID,
+        senderJid="2348011112222@s.whatsapp.net",
+        isGroup=True,
+        timestamp=int(datetime.now(timezone.utc).timestamp()) + 1,
+        text="Also lecturer dropped MTH 202 Linear Algebra homework due Tuesday",
+        media=IncomingMediaInfo(
+            mimeType="image/jpeg",
+            fileName="mth202.jpg",
+            fileSize=len(sample_b64),
+            dataBase64=sample_b64,
+        ),
+    )
+
+    res2 = await orchestrator.handle_incoming_message(msg2, test_session)
+    assert res2["status"] == "queued_for_review"
+    # Separate assignment was created!
+    assert res2["assignment_id"] != res1["assignment_id"]

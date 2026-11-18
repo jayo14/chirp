@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
@@ -58,6 +58,35 @@ class AssignmentRepository:
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none() is not None
+
+    async def find_recent_pending_from_sender(
+        self,
+        sender_jid: str,
+        chat_jid: str,
+        window_seconds: int = 10,
+    ) -> Optional[Assignment]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        stmt = (
+            select(Assignment)
+            .join(AssignmentSource, Assignment.id == AssignmentSource.assignment_id)
+            .where(
+                and_(
+                    AssignmentSource.sender_jid == sender_jid,
+                    AssignmentSource.chat_jid == chat_jid,
+                    AssignmentSource.created_at >= cutoff,
+                    Assignment.status == AssignmentStatus.PENDING_REVIEW,
+                )
+            )
+            .options(
+                selectinload(Assignment.attachments),
+                selectinload(Assignment.sources),
+                selectinload(Assignment.review_records),
+            )
+            .order_by(AssignmentSource.created_at.desc())
+            .limit(1)
+        )
+        res = await self.session.execute(stmt)
+        return res.scalar_one_or_none()
 
     async def create_source(
         self,
