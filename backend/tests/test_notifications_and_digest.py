@@ -118,3 +118,47 @@ async def test_monday_catchup_weekly_digest(test_engine, test_session, mock_gate
     res = list((await test_session.execute(stmt)).scalars().all())
     assert len(res) == 1
 
+
+@pytest.mark.asyncio
+async def test_past_deadline_assignments_transition_to_overdue(test_engine, test_session, mock_gateway_client):
+    from datetime import timedelta
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from backend.app.repositories.assignment_repo import AssignmentRepository
+    from backend.app.scheduler.job_runner import SchedulerService
+
+    session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+    scheduler = SchedulerService(session_maker=session_factory)
+    assign_repo = AssignmentRepository(test_session)
+
+    # 1. Create published assignment with deadline in the past
+    now_utc = datetime.now(timezone.utc)
+    assignment = await assign_repo.create_assignment(
+        course_code="CSC 401",
+        course_title="Distributed Systems",
+        title="Past Lab",
+        description="Implement Raft",
+        deadline_at=now_utc - timedelta(hours=2),
+        status=AssignmentStatus.PUBLISHED,
+    )
+    # 2. Create another published assignment with deadline in the future
+    future_assign = await assign_repo.create_assignment(
+        course_code="CSC 402",
+        course_title="Computer Security",
+        title="Future Lab",
+        description="Implement RSA",
+        deadline_at=now_utc + timedelta(days=2),
+        status=AssignmentStatus.PUBLISHED,
+    )
+    await test_session.commit()
+
+    # Trigger scheduler tick
+    await scheduler.tick()
+
+    # Verify past assignment transitioned to OVERDUE
+    await test_session.refresh(assignment)
+    assert assignment.status == AssignmentStatus.OVERDUE
+
+    # Verify future assignment remains PUBLISHED
+    await test_session.refresh(future_assign)
+    assert future_assign.status == AssignmentStatus.PUBLISHED
+

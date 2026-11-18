@@ -68,6 +68,12 @@ class SchedulerService:
                 logger.info(f"Recovered {recovered_count} stale claimed notifications back to PENDING.")
                 await session.commit()
 
+            # 0b. Transition past-deadline assignments to OVERDUE status
+            overdue_count = await assignment_repo.mark_overdue_assignments(now_utc)
+            if overdue_count > 0:
+                logger.info(f"Marked {overdue_count} past-deadline assignments as OVERDUE.")
+                await session.commit()
+
             # 1. Claim due notifications atomically (commits CLAIMED state so DB locks are released)
             claimed_notifications = await notification_repo.claim_due_notifications(now_utc)
             await session.commit()

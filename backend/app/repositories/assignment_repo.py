@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.models.assignment import Assignment, AssignmentStatus
@@ -87,6 +87,26 @@ class AssignmentRepository:
         )
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
+
+    async def mark_overdue_assignments(self, now: datetime) -> int:
+        """
+        Transitions assignments past their deadline from PUBLISHED or UPDATED to OVERDUE.
+        Preserves assignment records permanently per PRD section 5.
+        """
+        stmt = (
+            update(Assignment)
+            .where(
+                and_(
+                    Assignment.deadline_at.isnot(None),
+                    Assignment.deadline_at <= now,
+                    Assignment.status.in_([AssignmentStatus.PUBLISHED, AssignmentStatus.UPDATED]),
+                )
+            )
+            .values(status=AssignmentStatus.OVERDUE)
+        )
+        res = await self.session.execute(stmt)
+        await self.session.flush()
+        return res.rowcount
 
     async def create_source(
         self,
